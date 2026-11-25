@@ -10228,7 +10228,19 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	// Claude Code's advisor, run by magpie for a model whose upstream
 	// can't (advisor_serve.go)
 	advised := advisedHere(p, from, to, model, body, wiresOf(r.Context()))
-	request, err := parseTranslated(from, to, body, advised)
+	parse := func(to provider.Protocol) (*Request, error) {
+		if from == provider.Responses && to == provider.Anthropic {
+			if history := agySearchHistory(r, p, model); history != nil {
+				req, err := readResponsesWithSearch(body, false, false, history)
+				if err != nil {
+					return nil, err
+				}
+				return afterParse(from, body, req)
+			}
+		}
+		return parseTranslated(from, to, body, advised)
+	}
+	request, err := parse(to)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
@@ -10241,7 +10253,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		for _, t := range s.usable(p, model) {
 			if searchesFor(p, t, model, request) && !magpieSearches(r.Context(), p) {
 				if from == provider.Responses && (to == provider.Responses) != (t == provider.Responses) {
-					request, err = parseRequest(from, body, false, t == provider.Responses)
+					request, err = parse(t)
 					if err != nil {
 						return writeError(w, from, 400, err.Error()), err.Error()
 					}

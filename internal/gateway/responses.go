@@ -47,7 +47,9 @@ type rItem struct {
 	EncryptedContent string  `json:"encrypted_content,omitempty"`
 	// web_search_call
 	Action *struct {
-		Query   string `json:"query"`
+		Type    string   `json:"type,omitempty"`
+		Queries []string `json:"queries,omitempty"`
+		Query   string   `json:"query"`
 		Sources []struct {
 			URL string `json:"url"`
 		} `json:"sources"`
@@ -337,6 +339,10 @@ func readResponses(body []byte, facts bool) (*Request, error) {
 // readResponsesFor keeps instruction roles and positions on Responses-to-
 // Responses turns. Other APIs keep their existing system/cache mapping.
 func readResponsesFor(body []byte, facts, keepInstructions bool) (*Request, error) {
+	return readResponsesWithSearch(body, facts, keepInstructions, nil)
+}
+
+func readResponsesWithSearch(body []byte, facts, keepInstructions bool, history *searchHistory) (*Request, error) {
 	decode := decodeJSON
 	if facts {
 		decode = decodeJSONView
@@ -347,7 +353,7 @@ func readResponsesFor(body []byte, facts, keepInstructions bool) (*Request, erro
 	if err := decode(body, &q); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
-	r := &Request{Model: q.Model, System: q.Instructions, MaxTokens: q.MaxOutputTokens, Temp: q.Temperature,
+	r := &Request{searchHistory: history, Model: q.Model, System: q.Instructions, MaxTokens: q.MaxOutputTokens, Temp: q.Temperature,
 		TopP: q.TopP, Stream: q.Stream, Parallel: q.ParallelToolCalls, Fast: q.ServiceTier == "priority" || q.ServiceTier == "ultrafast", Ultrafast: q.ServiceTier == "ultrafast", Tier: q.ServiceTier, CacheKey: q.PromptCacheKey, Include: q.Include,
 		ClientMetadata: sentRaw(q.ClientMetadata), AccessPrograms: q.AccessPrograms}
 	r.Text, r.Format = textFormat(sentRaw(q.Text))
@@ -386,7 +392,16 @@ func readResponsesFor(body []byte, facts, keepInstructions bool) (*Request, erro
 		var mode string
 		var sysModes []string
 		var rawItems []json.RawMessage // decoded only for native standalone outputs and sealed reasoning
-		for i, it := range items {
+		for i := 0; i < len(items); i++ {
+			it := items[i]
+			if it.Type == "web_search_call" {
+				if msgs, n := history.restore(items[i:]); n > 0 {
+					r.Messages = append(r.Messages, msgs...)
+					i += n - 1
+					replied = true
+					continue
+				}
+			}
 			if it.Role == "assistant" || strings.HasPrefix(it.Type, "function_call") || strings.HasPrefix(it.Type, "custom_tool_call") || strings.HasPrefix(it.Type, "tool_search") || it.Type == "reasoning" {
 				replied = true
 			}
@@ -2471,7 +2486,7 @@ func (e *responsesEncoder) event(ev Event) {
 		e.closeItem()
 		e.release(phaseCommentary)
 		e.item++
-		item := responsesSearchItem(ev.Text, ev.Hits)
+		item := responsesSearchItem(ev.ID, ev.Text, ev.Hits)
 		e.send("response.output_item.added", map[string]any{"output_index": e.item, "item": item})
 		e.send("response.web_search_call.completed", map[string]any{"output_index": e.item, "item_id": item["id"]})
 		e.send("response.output_item.done", map[string]any{"output_index": e.item, "item": item})
@@ -2554,7 +2569,10 @@ func (e *responsesEncoder) finish() {
 
 // responsesSearchItem keeps a completed search in both Responses reply forms.
 // Keep query for older clients and queries for clients using the current API.
-func responsesSearchItem(query string, hits []Hit) map[string]any {
+func responsesSearchItem(id, query string, hits []Hit) map[string]any {
+	if !strings.HasPrefix(id, searchIDPrefix) {
+		id = "ws_" + newID()
+	}
 	sources := make([]map[string]any, 0, len(hits))
 	for _, h := range hits {
 		if h.URL != "" {
@@ -2562,7 +2580,7 @@ func responsesSearchItem(query string, hits []Hit) map[string]any {
 		}
 	}
 	return map[string]any{
-		"id": "ws_" + newID(), "type": "web_search_call", "status": "completed",
+		"id": id, "type": "web_search_call", "status": "completed",
 		"action": map[string]any{"type": "search", "query": query, "queries": []string{query}, "sources": sources},
 	}
 }
@@ -2615,7 +2633,7 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 			item["id"] = itemPrefix(item) + newID()
 			output = append(output, item)
 		case Search:
-			output = append(output, responsesSearchItem(p.Text, p.Hits))
+			output = append(output, responsesSearchItem(p.ID, p.Text, p.Hits))
 		}
 	}
 	id := res.ID
