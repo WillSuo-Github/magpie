@@ -197,7 +197,7 @@ func toolLoopPlugin(t *testing.T, beforeRead func()) func(string, string) string
 
 func TestConfirmedToolWaitOutlastsNormalDrain(t *testing.T) {
 	var sessions recentConversations
-	key := conversationKey{provider: "agy-cli", session: "A"}
+	key := conversationKey{provider: "fakeco", session: "A"}
 	c := sessions.take(key, time.Now(), true)
 	first := &body{id: 1, c: &call{conversation: c}}
 	first.PluginTurnStop("tool_use")
@@ -251,5 +251,30 @@ func TestSecondRecycleWaitsForToolLoop(t *testing.T) {
 	}
 	if got := ask("B", fmt.Sprintf(`{"result":%q}`, b)); got != "finished" {
 		t.Fatalf("second owner lost its call: %s", got)
+	}
+}
+
+// A user's next prompt after end_turn still needs the ACP session where
+// the previous turn ran. Newer users and subagents go to the replacement.
+func TestHeavyHostKeepsAgyBetweenTurns(t *testing.T) {
+	var book recentConversations
+	key := conversationKey{provider: "agy-cli", account: "a", session: "A"}
+	c := book.take(key, time.Now(), true)
+	b := &body{id: 1, c: &call{conversation: c}}
+	b.PluginTurnStop("end_turn")
+	c.finish()
+	followUp := c.reportedAt.Add(2 * time.Minute)
+	if !book.live(followUp, true) || book.take(key, followUp, false) != c {
+		t.Fatal("a new user turn lost the ACP session on the draining host")
+	}
+	other := key
+	other.subagent = "child"
+	if book.take(other, followUp, false) != nil {
+		t.Fatal("a different subagent reached the draining session")
+	}
+	c.finish()
+	expired := c.reportedAt.Add(agyTurnIdle)
+	if book.live(expired, true) || book.take(key, expired, false) != nil {
+		t.Fatal("an idle ACP session kept the heavy host")
 	}
 }

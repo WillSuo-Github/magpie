@@ -141,10 +141,12 @@ minutes afterwards, within the usual ten-minute drain limit. For Anthropic
 Messages (including agy-cli), the gateway passes on the stop reason it already
 decoded. A `tool_use` keeps the owner eligible for thirty minutes, the
 bridge's default tool-result timeout. Another tool stop renews the wait. A
-terminal stop releases it once its last fetch drains. If the replacement also
-reports high memory while a confirmed tool loop is draining, its recycle
-waits for the old host to finish. At most one old host
-takes follow-ups. Explicit restart, changed proxy or gateway address, or process
+terminal stop releases it once its last fetch drains, except that an agy-cli
+`end_turn` keeps that conversation eligible for ten idle minutes. Its ACP
+process holds the history the next user turn needs. This matches the plugin's
+default idle lifetime. If the replacement also reports high memory while the
+previous host owns such a session or a confirmed tool loop, its recycle waits.
+At most one old host takes follow-ups. Explicit restart, changed proxy or gateway address, or process
 loss ends affinity to that host.
 
 Embeddings, rerank, speech and transcriptions reach a plugin provider whatever API its chat models are spoken on: `serveRetrieval` sends them under `Provider.OpenAIBase`, which is `plugin://<id>/v1` for a plugin (its Chat base for any other provider), so they arrive OpenAI-shaped at the plugin's `fetch`, at `<base>/embeddings`, `/rerank`, `/audio/speech` or `/audio/transcriptions` under the base `pluginFetch` picks for the body's model, with the model's own id. The plugin answers them or puts them in its vendor's shape (XYenon's Google AI Studio plugin: Gemini's `embedContent`, a TTS model's `generateContent`); magpie converts none of them to Gemini's API. Before, a plugin with no `@ai-sdk/openai-compatible` model was turned away 400 "has no OpenAI-style API". The model is named `provider/model`; the retrieval routes' key holds, account holds, masking and usage apply. `TestGooglePluginTakesEmbeddingsAndSpeech`.
