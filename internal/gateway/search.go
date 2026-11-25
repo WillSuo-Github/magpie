@@ -1499,6 +1499,7 @@ func (s *Server) searchRounds(ctx context.Context, q *Request, tool string, in <
 		if ctx.Err() != nil {
 			return
 		}
+		q.searchHistory.save(calls, results, searches)
 		// the client hears of the searches as its provider's own
 		for _, ev := range searches {
 			if (ev.Kind == KSearch || ev.Kind == KAdvice) && !send(ev) {

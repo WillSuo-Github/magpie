@@ -187,6 +187,7 @@ type Tool struct {
 
 // Request is a call to a model, whichever API it arrived in.
 type Request struct {
+	searchHistory *searchHistory
 	// clientCache is non-nil only for a request read with its client's
 	// marks: the Claude bridge's explicit opt-in, and a Messages ask
 	// translated to an Anthropic upstream (parseTranslated, #4571).
@@ -876,7 +877,7 @@ func (c *collector) add(ev Event) {
 		c.err, c.errStatus, c.errCode, c.errSaid, c.errResets = ev.Text, ev.Status, ev.Code, ev.Said, ev.Resets
 	case KSearch:
 		c.closeTool()
-		c.res.Parts = append(c.res.Parts, Part{Kind: Search, Text: ev.Text, Hits: ev.Hits})
+		c.res.Parts = append(c.res.Parts, Part{Kind: Search, ID: ev.ID, Text: ev.Text, Hits: ev.Hits})
 	case KImage:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Image, MediaType: ev.Name, Data: ev.Text})
