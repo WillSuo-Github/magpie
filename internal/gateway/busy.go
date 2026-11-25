@@ -5,13 +5,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/yetone/magpie/internal/plugin"
 )
 
 // Busy is what a restart of the magpie serving the gateway would cut
 // short (#577): the agents' requests in flight — a reply streaming, an
-// image being made — and the turns of Claude Code run through the
-// subscription bridge waiting on their caller's tool results, whose
-// Claude Code lives only in this process. A request in flight is one
+// image being made — and the turns of the Claude subscription
+// bridge and agy-cli waiting for caller tools on this process. A request in flight is one
 // that does work (not a GET: the model lists, the info another magpie
 // asks for every 15 s); the bridge's own helper calls are not counted
 // apart, a turn waiting on them being in Tools. Last is when the last
@@ -20,8 +21,7 @@ import (
 //
 // Bridge and BridgeLast are the same for the bridge's turns alone, which
 // a restart that hands the gateway over (handover.go) still waits for:
-// their Claude Code lives in this process, and only here can the turn go
-// on. Every other request finishes in the magpie that hands over while
+// their plugin or subscription process owns the live turn. Every other request finishes in the magpie that hands over while
 // the new one takes the next.
 type Busy struct {
 	Requests   int       `json:"requests"`
@@ -42,6 +42,15 @@ func (s *Server) Busy() Busy {
 	}
 	if n := s.bridgeDone.Load(); n != 0 {
 		b.BridgeLast = time.Unix(0, n)
+	}
+	// The next request from an agy tool loop must still reach this process.
+	// The active fetches are already in Requests, but a socket handover
+	// consults Bridge and Tools even in the gap between HTTP requests.
+	active, waiting, last := plugin.AgyRestartBusy()
+	b.Bridge += active
+	b.Tools += waiting
+	if last.After(b.BridgeLast) {
+		b.BridgeLast = last
 	}
 	return b
 }

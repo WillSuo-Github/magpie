@@ -152,3 +152,30 @@ func (b *body) PluginTurnStop(reason string) {
 		c.reportedAt = time.Now()
 	}
 }
+
+// AgyRestartBusy counts the agy work that belongs to this process. Handover
+// can finish an HTTP stream on the old gateway, but a later tool result
+// would go to the new one. Count the owner even after automatic recycling.
+func AgyRestartBusy() (active, waiting int, last time.Time) {
+	now := time.Now()
+	live.Lock()
+	defer live.Unlock()
+	for h := range live.hosts {
+		b := &h.conversations
+		b.mu.Lock()
+		for _, c := range b.entries {
+			if !c.agy {
+				continue
+			}
+			active += c.active
+			if c.active == 0 && c.stop == "tool_use" && c.holdsSession(now) {
+				waiting++
+			}
+			if c.last.After(last) {
+				last = c.last
+			}
+		}
+		b.mu.Unlock()
+	}
+	return
+}

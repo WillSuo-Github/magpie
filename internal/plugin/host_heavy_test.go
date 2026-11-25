@@ -278,3 +278,40 @@ func TestHeavyHostKeepsAgyBetweenTurns(t *testing.T) {
 		t.Fatal("an idle ACP session kept the heavy host")
 	}
 }
+
+func TestAgyRestartWaitsForClientToolAcrossRequests(t *testing.T) {
+	h := &host{}
+	live.Lock()
+	live.hosts[h] = true
+	live.Unlock()
+	t.Cleanup(func() { live.Lock(); delete(live.hosts, h); live.Unlock() })
+	key := conversationKey{provider: "agy-cli", session: "one"}
+	c := h.conversations.take(key, time.Now(), true)
+	if active, waiting, _ := AgyRestartBusy(); active != 1 || waiting != 0 {
+		t.Fatalf("active=%d waiting=%d", active, waiting)
+	}
+	stream := &body{id: 1, c: &call{conversation: c}}
+	stream.PluginTurnStop("tool_use")
+	c.finish()
+	if active, waiting, _ := AgyRestartBusy(); active != 0 || waiting != 1 {
+		t.Fatalf("between requests: active=%d waiting=%d", active, waiting)
+	}
+	c = h.conversations.take(key, time.Now(), false)
+	reply := &body{id: 2, c: &call{conversation: c}}
+	reply.PluginTurnStop("end_turn")
+	c.finish()
+	if active, waiting, last := AgyRestartBusy(); active != 0 || waiting != 0 || last.IsZero() {
+		t.Fatalf("completed: active=%d waiting=%d last=%v", active, waiting, last)
+	}
+
+	other := h.conversations.take(conversationKey{provider: "other", session: "two"}, time.Now(), true)
+	(&body{id: 3, c: &call{conversation: other}}).PluginTurnStop("tool_use")
+	other.finish()
+	c.book.mu.Lock()
+	c.stop = "tool_use"
+	c.reportedAt = time.Now().Add(-toolResultWait)
+	c.book.mu.Unlock()
+	if active, waiting, _ := AgyRestartBusy(); active != 0 || waiting != 0 {
+		t.Fatalf("expired or foreign tool: active=%d waiting=%d", active, waiting)
+	}
+}
