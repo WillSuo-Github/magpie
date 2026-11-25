@@ -1550,6 +1550,7 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			defer close(events)
 			defer res.Body.Close()
 			dec := decoderFor(p, actual, q.Tools)
+			noteStop := provider.PluginTurnStop(res, actual)
 			send := func(ev Event) error {
 				select {
 				case events <- ev:
@@ -1574,6 +1575,11 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				mu.Lock()
 				defer mu.Unlock()
 				heard()
+				if noteStop != nil {
+					if reason := upstreamStop([]byte(data)); reason != "" {
+						noteStop(reason)
+					}
+				}
 				if err := dec(data, func(ev Event) {
 					if failed == nil {
 						failed = send(ev)
