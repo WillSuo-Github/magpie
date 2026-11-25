@@ -832,9 +832,25 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 		Headers: h, Body: body, Session: req.Header.Get(ConversationHeader),
 	})
 	if err == nil {
+		if turn, ok := resp.Body.(interface{ PluginTurnStop(string) }); ok {
+			resp.Request = req.WithContext(context.WithValue(ctx, pluginStopKey{}, turn.PluginTurnStop))
+		}
 		notePluginSignIn(pp, account, resp)
 	}
 	return resp, err
+}
+
+type pluginStopKey struct{}
+
+// PluginTurnStop lets the decoder tell the host that a Messages reply ended
+// at a tool call. The originating request carries the callback through the
+// byte counters, peek readers and other wrappers around the response body.
+func PluginTurnStop(res *http.Response, proto Protocol) func(string) {
+	if proto != Anthropic || res.Request == nil {
+		return nil
+	}
+	note, _ := res.Request.Context().Value(pluginStopKey{}).(func(string))
+	return note
 }
 
 // pluginRequestBase is the base URL a plugin provider's request for m goes

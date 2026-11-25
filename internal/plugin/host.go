@@ -148,8 +148,9 @@ type call struct {
 
 	// h and id are how the call is given up: the child is told to stop its
 	// fetch only while the call is still the host's.
-	h  *host
-	id int64
+	h            *host
+	conversation *hostConversation
+	id           int64
 
 	// The host lock owns lifecycle transitions; the queue lock also protects
 	// the persistent answer so notifications never own the vendor outcome.
@@ -454,6 +455,8 @@ func (c *call) notify() {
 
 // host is one Bun process running host.js.
 type host struct {
+	conversations recentConversations
+
 	cmd *exec.Cmd
 	in  io.WriteCloser
 	// out carries messages to the single writer goroutine that owns the
@@ -858,6 +861,7 @@ func Restart() {
 	hostMu.Lock()
 	h := current
 	current = nil
+	recycledHost, nextRecycle = nil, nil
 	hostMu.Unlock()
 	if h != nil {
 		h.retire()
@@ -865,16 +869,16 @@ func Restart() {
 	changed()
 }
 
-// retireWait is how long a retired host may go on answering its calls.
+// retireWait bounds ordinary draining. Confirmed tool loops have their own deadline.
 var retireWait = 10 * time.Minute
 
 // retiring are the hosts finishing their calls before they stop.
 var retiring = map[*host]bool{}
 
-// retire stops h now when it answers no call, else once it has answered
-// them (retireWait at most), in the background.
+// retire stops h once its calls and eligible conversations have drained.
 func (h *host) retire() {
-	if !h.busy() {
+	end := time.Now().Add(retireWait)
+	if !h.drainUntil(end) {
 		h.stop()
 		return
 	}
@@ -885,10 +889,10 @@ func (h *host) retire() {
 		defer func() {
 			hostMu.Lock()
 			delete(retiring, h)
+			releaseOwnerLocked(h)
 			hostMu.Unlock()
 		}()
-		end := time.Now().Add(retireWait)
-		for h.busy() && time.Now().Before(end) {
+		for h.drainUntil(end) {
 			select {
 			case <-h.dead:
 				return
@@ -899,10 +903,17 @@ func (h *host) retire() {
 	}()
 }
 
-// busy is whether h is answering a call: a slot is held by every live or
-// retiring call, so this counts a call whose body is still draining too.
-func (h *host) busy() bool {
-	return len(h.slots) > 0
+// Remove the route before closing stdin, under the same lock that selects
+// and reserves the host. No fetch can claim an owner already going away.
+func (h *host) drainUntil(end time.Time) bool {
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	now := time.Now()
+	if (now.Before(end) && len(h.slots) > 0) || (recycledHost == h && h.conversations.live(now, !now.Before(end))) {
+		return true
+	}
+	releaseOwnerLocked(h)
+	return false
 }
 
 // Running is whether a host is up.
@@ -1009,28 +1020,62 @@ func hostScript(name string, js []byte) (string, error) {
 // get is the running host, started (Bun downloaded, the plugins loaded)
 // when there is none.
 func get(ctx context.Context) (*host, error) {
+	h, _, err := hostFor(ctx, conversationKey{})
+	return h, err
+}
+
+func hostFor(ctx context.Context, key conversationKey) (*host, *hostConversation, error) {
 	checkList()
 	if err := hostMu.LockCtx(ctx); err != nil {
 		if e := bunNotReadyNow(err); e != nil {
-			return nil, e
+			return nil, nil, e
 		}
-		return nil, fmt.Errorf("waiting for the plugin host: %w", err)
+		return nil, nil, fmt.Errorf("waiting for the plugin host: %w", err)
 	}
 	defer hostMu.Unlock()
-	return getLocked(ctx)
+	if key.session == "" {
+		h, err := getLocked(ctx)
+		return h, nil, err
+	}
+	checkHostLocked()
+	now := time.Now()
+	if old := recycledHost; old != nil && old.alive() {
+		if old.proxyMoved() {
+			releaseOwnerLocked(old)
+		} else if c := old.conversations.take(key, now, false); c != nil {
+			return old, c, nil
+		}
+	}
+	h, err := currentLocked(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return h, h.conversations.take(key, now, true), nil
 }
 
 // getLocked requires hostMu. Gateway hooks bound both the lock wait and
 // startup with their request-hook budget.
 func getLocked(ctx context.Context) (*host, error) {
-	if hostStale.Swap(false) && current != nil {
-		go current.retire()
-		current = nil
+	checkHostLocked()
+	return currentLocked(ctx)
+}
+
+func checkHostLocked() {
+	if hostStale.Swap(false) {
+		recycledHost, nextRecycle = nil, nil
+		if current != nil {
+			go current.retire()
+			current = nil
+		}
 	}
 	if current != nil && current.alive() && current.proxyMoved() {
+		recycledHost, nextRecycle = nil, nil
 		go current.retire()
 		current = nil
 	}
+}
+
+func currentLocked(ctx context.Context) (*host, error) {
 	if current != nil && current.alive() {
 		return current, nil
 	}
@@ -1326,16 +1371,21 @@ var (
 	heavyEvery = time.Minute
 )
 
-// recycle replaces h, when it is still the host calls go to, as a plugin
-// update does (Restart): the calls h is answering finish on it, and the
-// next call starts a new host. recycles counts the hosts it replaced.
+// recycle moves new conversations and RPCs to a fresh host. Follow-ups of
+// conversations recently served by h can still reach it while it drains.
 func (h *host) recycle() {
 	hostMu.Lock()
 	if current != h {
 		hostMu.Unlock()
 		return
 	}
+	if old := recycledHost; old != nil && old.alive() && old.conversations.live(time.Now(), true) {
+		nextRecycle = h
+		hostMu.Unlock()
+		return
+	}
 	current = nil
+	recycledHost, nextRecycle = h, nil
 	hostMu.Unlock()
 	recycles.Add(1)
 	h.retire()
@@ -1781,14 +1831,14 @@ func (h *host) begin(stream bool) (int64, *call, error) {
 			return 0, nil, errTooManyCalls
 		}
 	}
-	return h.admit(stream)
+	return h.admit(stream, nil)
 }
 
 // beginStream is begin for a fetch: while the budget's windows are all held
 // it waits for one to come free, for streamWait at most and only while ctx
 // lives, rather than failing a request that would have run a moment later.
 // The wait is outside h.mu, which the call that frees a window takes.
-func (h *host) beginStream(ctx context.Context) (int64, *call, error) {
+func (h *host) beginStream(ctx context.Context, conversation *hostConversation) (int64, *call, error) {
 	select {
 	case h.streams <- struct{}{}:
 	default:
@@ -1804,11 +1854,11 @@ func (h *host) beginStream(ctx context.Context) (int64, *call, error) {
 			return 0, nil, errTooManyCalls
 		}
 	}
-	return h.admit(true)
+	return h.admit(true, conversation)
 }
 
 // admit registers a call whose stream window, if it is a stream, is taken.
-func (h *host) admit(stream bool) (int64, *call, error) {
+func (h *host) admit(stream bool, conversation *hostConversation) (int64, *call, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.alive() {
@@ -1831,13 +1881,14 @@ func (h *host) admit(stream bool) (int64, *call, error) {
 	}
 	h.next++
 	id := h.next
-	c.h, c.id = h, id
+	c.h, c.id, c.conversation = h, id, conversation
 	h.calls[id] = c
 	return id, c, nil
 }
 
 // releaseSlot is called only by the transition that enters released.
 func (h *host) releaseSlot(c *call) {
+	c.conversation.finish()
 	<-h.slots
 	if c.stream {
 		<-h.streams
@@ -2132,15 +2183,16 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 	if err := netproxy.Held(ctx); err != nil {
 		return nil, err
 	}
-	h, err := get(ctx)
+	h, conversation, err := hostFor(ctx, r.conversationKey())
 	if err != nil {
 		return nil, err
 	}
 	if r.Proxy == "" {
 		r.Proxy = proxyOf(ctx)
 	}
-	id, c, err := h.beginStream(ctx)
+	id, c, err := h.beginStream(ctx, conversation)
 	if err != nil {
+		conversation.finish()
 		return nil, err
 	}
 	line, err := fetchLine(id, r)

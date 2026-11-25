@@ -2,6 +2,7 @@
 // whose requests go to $FAKE_BASE; $FAKE_ID names it another's id, as a
 // built-in's plugin does.
 const ID = process.env.FAKE_ID || "fakeco"
+const pendingTools = new Set()
 
 // born is when the host loaded the plugin. The accounts' windows renew at
 // times set from it, as a vendor's are: read again, an account renews when
@@ -246,6 +247,15 @@ export const FakePlugin = async ({ client }) => ({
       apiKey: "dummy",
       baseURL: process.env.FAKE_BASE,
       async fetch(url, init) {
+        if (process.env.FAKE_TOOL_LOOP) {
+          const request = JSON.parse(init.body)
+          if (request.result) {
+            return new Response(pendingTools.delete(request.result) ? "finished" : "no live call")
+          }
+          const id = crypto.randomUUID()
+          pendingTools.add(id)
+          return new Response(id)
+        }
         let a = await getAuth()
         // "r-revoked": the vendor turned the refresh away, said as Zed's says it
         if (a.type === "oauth" && a.refresh === "r-revoked") throw Object.assign(new Error("FakeCo turned the sign-in away"), { signIn: "expired" })

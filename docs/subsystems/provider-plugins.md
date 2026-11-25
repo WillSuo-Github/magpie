@@ -130,6 +130,23 @@ A request `pluginFetch` sends goes under the loader's `baseURL`, else the model'
 
 A plugin model is spoken to on the API of its AI SDK package (`pluginProtocol`: `@ai-sdk/anthropic` is Anthropic's messages, `@ai-sdk/openai` Responses, `@ai-sdk/google` Code Assist, anything else chat completions). A plugin whose vendor serves a model on other APIs too lists their packages on the model as `also` (an array, on the config model or the models hook's; the host passes it as `plugin.Model.Also`). `pluginProtocols` gives the model's own API first and then those, which is what `ListedAPIs` (`pluginAPIs`), the catalog's `APIs` and the provider's bases are built from, so a client's request on any of them is relayed to the plugin's `fetch` as it was sent, and only a request on an API not listed is translated, to the model's own (`usable` puts it first for a plugin). Before, the one API was all a plugin model had: OpenDesign's Anthropic request to an Open Design Cloud model declared on chat completions went upstream as chat completions, though amr-link serves every model on all three (gaubeebangeel on X, plugins#888). A model with no `also` is unchanged. The plugin's `fetch` signs by the request's path, not the declared package (Open Design's `signFor`). `TestPluginModelServedOnMoreAPIsKeepsTheClientAPI`.
 
+On an automatic memory recycle, the [plugin host](../../internal/plugin/host.go)
+starts new conversations and RPCs on the replacement. Recently active fetches
+for the same provider, account, session and subagent can still go to the
+previous host, where a plugin may have an upstream call waiting for a tool
+result. The agent's explicit session takes precedence over the gateway's
+conversation ID. Each host remembers at most 512 conversations. Without a
+known stop reason a conversation stays eligible during a fetch and for two
+minutes afterwards, within the usual ten-minute drain limit. For Anthropic
+Messages (including agy-cli), the gateway passes on the stop reason it already
+decoded. A `tool_use` keeps the owner eligible for thirty minutes, the
+bridge's default tool-result timeout. Another tool stop renews the wait. A
+terminal stop releases it once its last fetch drains. If the replacement also
+reports high memory while a confirmed tool loop is draining, its recycle
+waits for the old host to finish. At most one old host
+takes follow-ups. Explicit restart, changed proxy or gateway address, or process
+loss ends affinity to that host.
+
 Embeddings, rerank, speech and transcriptions reach a plugin provider whatever API its chat models are spoken on: `serveRetrieval` sends them under `Provider.OpenAIBase`, which is `plugin://<id>/v1` for a plugin (its Chat base for any other provider), so they arrive OpenAI-shaped at the plugin's `fetch`, at `<base>/embeddings`, `/rerank`, `/audio/speech` or `/audio/transcriptions` under the base `pluginFetch` picks for the body's model, with the model's own id. The plugin answers them or puts them in its vendor's shape (XYenon's Google AI Studio plugin: Gemini's `embedContent`, a TTS model's `generateContent`); magpie converts none of them to Gemini's API. Before, a plugin with no `@ai-sdk/openai-compatible` model was turned away 400 "has no OpenAI-style API". The model is named `provider/model`; the retrieval routes' key holds, account holds, masking and usage apply. `TestGooglePluginTakesEmbeddingsAndSpeech`.
 
 A plugin's model that says it gives video (`capabilities.output.video`, or `modalities.output: ["video"]`) makes videos (`customVideomakers`; the Grok plugin keeps its own). Start, poll and content go OpenAI-shaped through the plugin's `fetch` on the account, to `<base>/videos`, `/videos/{id}` and `/videos/{id}/content` (`videoBase`, `Provider.OpenAIBase`): a POST of OpenAI's video body (`remoteVideoBody`: `model` as the plugin's id for it, `prompt`, `seconds`, `size`, `input_reference` as a data URL), answered `{id, object: "video", status, progress, model}`; the id is the vendor's, path-escaped in the GET. The poll and content GETs carry no model, so `pluginFetch` sends them under the loader's base (else the provider's `api`, else its npm's). The video's id names the account that started it (`keyMark`: `a` + `signer`), and `markedKey` asks after it on that account of the plugin's (`AlsoOn`) while it is signed in. Key account and model holds apply to all three routes (`videoAsker`, `videoModelHeld`, which needs the answer's `model`), and the start is in the usage ledger. `TestPluginMakesVideos`.

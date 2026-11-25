@@ -8064,6 +8064,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	f, _ := w.(http.Flusher)
 	sniff := newSniffer(proto, res.Header.Get("Content-Type"))
+	sniff.noteStop = provider.PluginTurnStop(res, proto)
 	defer func() { u.add(sniff.usage().advisedAs(advisor)) }()
 	var tidy *chatTidy
 	if proto == provider.Chat && sse {
@@ -10159,11 +10160,16 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		spent = spent || spends(ev)
 		col.add(ev)
 	}))
+	noteStop := provider.PluginTurnStop(res, actual)
 	err = readSSE(rd, func(_, data string) error {
 		tail.see([]byte(data))
 		found.see(actual, []byte(data))
 		u.add(Usage{Upstream: upstreamOf([]byte(data)), Tier: upstreamTier([]byte(data)), searches: found.count()})
-		ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
+		st := upstreamStop([]byte(data))
+		if noteStop != nil && st != "" {
+			noteStop(st)
+		}
+		ended = ended || replyEnds(actual, data, st)
 		return dec(data, see)
 	})
 	// a Chat reply that carried nothing at all and no finish_reason, but

@@ -696,7 +696,7 @@ func TestHostFetchWaitsForAStreamWindow(t *testing.T) {
 	}
 	waited := make(chan got, 1)
 	go func() {
-		id, _, err := f.host.beginStream(context.Background())
+		id, _, err := f.host.beginStream(context.Background(), nil)
 		waited <- got{id, err}
 	}()
 	select {
@@ -715,7 +715,7 @@ func TestHostFetchWaitsForAStreamWindow(t *testing.T) {
 	// the budget is held again: a request that ends gives the wait up
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		_, _, err := f.host.beginStream(ctx)
+		_, _, err := f.host.beginStream(ctx, nil)
 		waited <- got{0, err}
 	}()
 	cancel()
@@ -723,7 +723,7 @@ func TestHostFetchWaitsForAStreamWindow(t *testing.T) {
 		t.Fatalf("a fetch whose request ended = %v, want canceled", g.err)
 	}
 	streamWait = 10 * time.Millisecond
-	if _, _, err := f.host.beginStream(context.Background()); !errors.Is(err, errTooManyCalls) {
+	if _, _, err := f.host.beginStream(context.Background(), nil); !errors.Is(err, errTooManyCalls) {
 		t.Fatalf("a fetch past streamWait = %v, want errTooManyCalls", err)
 	}
 	if free := cap(f.host.streams) - len(f.host.streams); free != 0 {

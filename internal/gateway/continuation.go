@@ -693,6 +693,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 						enc.keepalive()
 					}
 				})
+				noteStop := provider.PluginTurnStop(res, actual)
 				serr = readSSEAlive(rd, func(_, data string) error {
 					wmu.Lock()
 					defer wmu.Unlock()
@@ -700,6 +701,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					tail.see([]byte(data))
 					found.see(actual, []byte(data))
 					st := upstreamStop([]byte(data))
+					if noteStop != nil && st != "" {
+						noteStop(st)
+					}
 					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data)), searches: found.count()})
 					ended = ended || replyEnds(actual, data, st)
 					if err := dec(data, attemptSee); err != nil {
